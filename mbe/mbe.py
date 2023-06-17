@@ -5,6 +5,7 @@ from .yin import Yin
 import matplotlib.pyplot as plt
 
 class Mbe(OlaBuffer):
+    DEBUG = False
 
     def __init__(self, frame_size, num_overlap, sr):
         super().__init__(frame_size, num_overlap)
@@ -20,7 +21,9 @@ class Mbe(OlaBuffer):
     def _processor(self, frame):
 
         pitch_hz = self._yin.predict(frame)
-        self._debug.append(pitch_hz)
+
+        if self.DEBUG:
+            self._debug.append(pitch_hz)
 
         return frame
     
