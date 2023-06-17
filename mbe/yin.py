@@ -1,12 +1,14 @@
 import numpy as np
+from .util import db_to_power
 
 class Yin():
 
     LOW_PITCH_HZ = 50
     HIGH_PITCH_HZ = 600
 
-    def __init__(self, window_size, sr):
+    def __init__(self, window_size, sr, silence_db=-40):
         self._window_size = window_size
+        self._silence_threshold = db_to_power(silence_db)
         self._sr = sr
 
         lower_tau = int((1 / self.HIGH_PITCH_HZ) * sr)
@@ -51,5 +53,9 @@ class Yin():
 
         best_tau = best_idx + self._tau_range[0]
         estimate_hz = self._sr / best_tau
+
+        power = np.mean(x ** 2)
+        if power < self._silence_threshold:
+            estimate_hz = 0
 
         return estimate_hz

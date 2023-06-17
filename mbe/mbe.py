@@ -1,19 +1,16 @@
 import numpy as np
 from olabuffer import OlaBuffer
 from .yin import Yin
-from .util import db_to_power
 
 import matplotlib.pyplot as plt
 
 class Mbe(OlaBuffer):
 
-    def __init__(self, frame_size, num_overlap, silence_db, sr):
+    def __init__(self, frame_size, num_overlap, sr):
         super().__init__(frame_size, num_overlap)
 
         window_size = frame_size // 2
         self._yin = Yin(window_size, sr)
-
-        self._silence_threshold = db_to_power(silence_db)
 
         self._debug = []
 
@@ -23,11 +20,6 @@ class Mbe(OlaBuffer):
     def _processor(self, frame):
 
         pitch_hz = self._yin.predict(frame)
-
-        power = np.mean(frame ** 2)
-        if power < self._silence_threshold:
-            pitch_hz = 0
-
         self._debug.append(pitch_hz)
 
         return frame
