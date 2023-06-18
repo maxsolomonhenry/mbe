@@ -1,11 +1,12 @@
 import numpy as np
-from .util import rms, interpolated_read
+from .util import rms, interpolated_read, mag_to_db
 from .ola_buffer import OlaBuffer
 from .oscillator import Oscillator
 from .yin import Yin
 
 class Mbe(OlaBuffer):
-    DEBUG = False
+    DEBUG = True
+    VOICED_THRESHOLD = 2
 
     def __init__(self, frame_size, num_overlap, num_partials, sr):
         super().__init__(frame_size, num_overlap)
@@ -41,12 +42,16 @@ class Mbe(OlaBuffer):
         window /= np.sqrt(np.sum(window ** 2))
         return window
     
-    def _calculate_partial_gains(self, frame, f0):
+    def _calculate_partial_gains_and_errors(self, frame, f0):
 
         gains = np.zeros(self._num_partials)
+        errors = np.zeros(self._num_partials)
 
         frame *= self._window
         X = np.fft.fft(frame, self._nfft)
+
+        mX = np.abs(X)
+        mW = np.abs(self._W)
 
         f0_bin = f0 / self._sr * self._nfft
         for i in range(self._num_partials):
@@ -65,9 +70,28 @@ class Mbe(OlaBuffer):
                 power += self._W[-j] * np.conj(interpolated_read(X, -bin_idx + j))
 
             power /= self._nfft
-            gains[i] = power
+            power = np.real(power)
 
-        return gains
+            error = 0
+            norm = 0
+
+            for j in range(self._num_lobe_bins):
+                error += (interpolated_read(mX, bin_idx + j) - power * mW[j]) ** 2
+                norm += interpolated_read(mX, bin_idx + j) ** 2
+                
+                if j == 0:
+                    continue
+                
+                error += (interpolated_read(mX, bin_idx - j) - power * mW[-j]) ** 2
+                norm += interpolated_read(mX, bin_idx - j) ** 2
+
+            if norm != 0:
+                error /= norm
+
+            gains[i] = power
+            errors[i] = error
+
+        return gains, errors
 
     def _pre_processor(self, x):
         return x
@@ -77,29 +101,54 @@ class Mbe(OlaBuffer):
         new_pitch_hz = self._yin.predict(frame)
 
         new_gains = np.zeros(self._num_partials)
+        errors = np.zeros(self._num_partials)
         if new_pitch_hz != 0:
-            new_gains = self._calculate_partial_gains(frame, new_pitch_hz)
+            new_gains, errors = self._calculate_partial_gains_and_errors(
+                frame, new_pitch_hz)
+        
+        noise_gains = np.zeros(self._num_partials)
+        for i in range(self._num_partials):
+            if errors[i] > self.VOICED_THRESHOLD:
+                noise_gains[i] = new_gains[i].copy()
+                new_gains[i] = 0
 
         self._update_interp_tracks(new_pitch_hz, new_gains)
 
         if self.DEBUG:
-            self._debug.append(new_pitch_hz)
+            self._debug.append(errors)
 
-        X = np.fft.rfft(frame)
-        phase = np.random.rand(X.shape[0]) * 2 * np.pi
-        X = np.abs(X) * (np.exp(np.complex(0, 1) * phase))
-
-        frame = np.fft.irfft(X)
-
+        frame = self._make_unvoiced_frame(noise_gains, new_pitch_hz)
         return frame
     
+
+    def _make_unvoiced_frame(self, noise_gains, f0):
+
+        f0_bin = f0 / self._sr * self._nfft
+        bin_idxs = [(i + 1) * f0_bin for i in range(self._num_partials)]
+
+        hN = self._frame_size // 2 + 1
+        tmp = np.arange(hN)
+        mX = np.interp(tmp, bin_idxs, noise_gains)
+
+        max_idx = int(np.ceil(np.max(bin_idxs)))
+
+        if max_idx > hN:
+            mX[max_idx:] = 0
+
+        mX *= np.sqrt(self._frame_size)
+
+        phase = np.random.rand(hN) * 2 * np.pi
+        X = mX * (np.exp(np.complex(0, 1) * phase))
+
+        frame = np.fft.irfft(X) / 4
+
+        return frame
+
     def _post_processor(self, x):
 
         pitch_hz = self._interp_pitch_hz[self._interp_idx]
         gains = self._interp_gains[:, self._interp_idx]
         self._interp_idx += 1
-
-        x = 0
 
         if pitch_hz == 0:
             return x
@@ -137,5 +186,4 @@ class Mbe(OlaBuffer):
         self._frame_gains = new_gains
     
     def get_debug(self):
-        return np.array(self._debug)
-    
+        return self._debug
