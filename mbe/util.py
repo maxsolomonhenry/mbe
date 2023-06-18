@@ -36,3 +36,20 @@ def upsample(x, frame_rate, sr):
     idx_upsample = np.linspace(0, num_frames, num_samples)
 
     return np.interp(idx_upsample, idx_x, x)
+
+def interpolated_read(x, idx):
+    EPS = 1e-10
+
+    if np.abs(idx) >= (len(x) - 1):
+        return 0
+
+    residual = idx % 1
+
+    is_whole_number = (residual < EPS)
+    if is_whole_number:
+        return x[int(idx)]
+    
+    below = x[np.floor(idx).astype(int)]
+    above = x[np.ceil(idx).astype(int)]
+
+    return below * (1 - residual) + above * (residual)

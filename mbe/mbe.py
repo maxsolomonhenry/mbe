@@ -1,5 +1,5 @@
 import numpy as np
-from .util import rms
+from .util import rms, interpolated_read
 from .ola_buffer import OlaBuffer
 from .oscillator import Oscillator
 from .yin import Yin
@@ -10,10 +10,17 @@ class Mbe(OlaBuffer):
     def __init__(self, frame_size, num_overlap, num_partials, sr):
         super().__init__(frame_size, num_overlap)
 
+        self._sr = sr
+
         yin_window_size = frame_size // 2
         self._yin = Yin(yin_window_size, sr)
 
-        self._window = np.hamming(frame_size)
+        self._window = self._make_energy_normalized_window(frame_size)
+        self._nfft = frame_size * 4
+
+        self._W = np.fft.fft(self._window, self._nfft)
+        self._num_lobe_bins = 12 # TODO: Rename.
+        self._nyquist = sr // 2 - (2 * self._num_lobe_bins * sr / self._nfft)
 
         self._num_partials = num_partials
         self._oscillators = [Oscillator(sr) for _ in range(num_partials)]
@@ -29,6 +36,39 @@ class Mbe(OlaBuffer):
 
         self._debug = []
 
+    def _make_energy_normalized_window(self, frame_size):
+        window = np.hanning(frame_size)
+        window /= np.sqrt(np.sum(window ** 2))
+        return window
+    
+    def _calculate_partial_gains(self, frame, f0):
+
+        gains = np.zeros(self._num_partials)
+
+        frame *= self._window
+        X = np.fft.fft(frame, self._nfft)
+
+        f0_bin = f0 / self._sr * self._nfft
+        for i in range(self._num_partials):
+            bin_idx = (i + 1) * f0_bin
+
+            power = 0
+            for j in range(self._num_lobe_bins):
+
+                power += self._W[j] * np.conj(interpolated_read(X, bin_idx + j))
+                power += self._W[j] * np.conj(interpolated_read(X, - bin_idx - j))
+
+                if j == 0:
+                    continue
+
+                power += self._W[-j] * np.conj(interpolated_read(X, bin_idx - j))
+                power += self._W[-j] * np.conj(interpolated_read(X, -bin_idx + j))
+
+            power /= self._nfft
+            gains[i] = power
+
+        return gains
+
     def _pre_processor(self, x):
         return x
 
@@ -36,8 +76,9 @@ class Mbe(OlaBuffer):
 
         new_pitch_hz = self._yin.predict(frame)
 
-        # TODO: Temporary.
-        new_gains = np.ones(self._num_partials) * rms(frame)
+        new_gains = np.zeros(self._num_partials)
+        if new_pitch_hz != 0:
+            new_gains = self._calculate_partial_gains(frame, new_pitch_hz)
 
         self._update_interp_tracks(new_pitch_hz, new_gains)
 
@@ -65,6 +106,10 @@ class Mbe(OlaBuffer):
 
         for i in range(self._num_partials):
             partial_hz = (i + 1) * pitch_hz
+
+            if partial_hz >= self._nyquist:
+                continue
+
             x += self._oscillators[i].tick(partial_hz) * gains[i]
 
         return x
